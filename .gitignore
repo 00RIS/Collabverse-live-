@@ -1,0 +1,29 @@
+﻿# Secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Python environments and cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Frontend generated files and dependencies
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local uploads and generated data
+backend/uploads/
+backend/unstop_response.json
+
+# Logs and editor files
+*.log
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
