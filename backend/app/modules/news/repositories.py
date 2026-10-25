@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.modules.news.models import (
@@ -62,14 +63,23 @@ class NewsRepository:
         articles: list[dict],
     ) -> int:
 
+        # A single feed batch can contain the same article in multiple
+        # categories. Deduplicate before the existence checks, then also use
+        # ON CONFLICT to cover simultaneous refresh requests.
+        unique_articles: dict[str, dict] = {}
+        for article_data in articles:
+            article_url = article_data.get("article_url")
+            if not article_url:
+                continue
+            unique_articles.setdefault(article_url, article_data)
+
         created = 0
 
-        for article_data in articles:
+        to_insert = []
+        for article_url, article_data in unique_articles.items():
 
             existing = self.get_by_url(
-                article_data[
-                    "article_url"
-                ]
+                article_url
             )
 
             if existing:
@@ -79,14 +89,25 @@ class NewsRepository:
                     existing.summary = article_data["summary"]
                 continue
 
-            article = NewsArticle(
-                **article_data
-            )
+            to_insert.append(article_data)
 
-            self.db.add(article)
-            created += 1
+        try:
+            if to_insert:
+                result = self.db.execute(
+                    pg_insert(NewsArticle)
+                    .values(to_insert)
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            NewsArticle.article_url
+                        ]
+                    )
+                )
+                created = max(result.rowcount or 0, 0)
 
-        self.db.commit()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
         return created
 
