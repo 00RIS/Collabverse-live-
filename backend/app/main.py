@@ -121,10 +121,13 @@ app.add_middleware(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+   allow_origins=[
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://collabverse-live.vercel.app",
+    "https://collabverse-live-git-main-rishabhjangra34-5417.vercel.app",
+    "https://collabverse-live-kkd53p6ac-rishabhjangra34-5417.vercel.app",
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
