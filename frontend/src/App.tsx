@@ -1,6 +1,8 @@
 import { FormEvent, MouseEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 
-const API = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000/api/v1'
+
+const API = import.meta.env.VITE_API_URL ?? 'https://collabverse-live-3.onrender.com/api/v1'
+
 type User = { id: string; email: string; role: string; avatar_url?: string | null; profile?: { full_name?: string; headline?: string; company_name?: string; institution_name?: string; [key: string]: unknown } }
 type Post = { id: string; author_id: string; post_type: string; content: string | null; created_at: string; like_count: number; comment_count: number; liked_by_me: boolean; media?: { id: string; media_type: string; media_url: string; thumbnail_url?: string | null }[] }
 type PublicUser = { id: string; full_name: string; role: string; headline?: string | null; avatar_url?: string | null }
