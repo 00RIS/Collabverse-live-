@@ -1,12 +1,7 @@
 import uuid
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-
-from app.models.connection import (
-    Connection,
-    ConnectionStatus,
-)
 
 from app.modules.posts.models import (
     Post,
@@ -215,56 +210,10 @@ class PostRepository:
         offset: int = 0,
     ) -> list[Post]:
 
-        # Get accepted connections
-        connection_query = (
-            select(Connection)
-            .where(
-                Connection.status
-                == ConnectionStatus.ACCEPTED,
-                or_(
-                    Connection.requester_id
-                    == user_id,
-                    Connection.recipient_id
-                    == user_id,
-                ),
-            )
-        )
-
-        connections = list(
-            self.db.scalars(
-                connection_query
-            ).all()
-        )
-
-        connected_user_ids = []
-
-        for connection in connections:
-
-            if (
-                connection.requester_id
-                == user_id
-            ):
-                connected_user_ids.append(
-                    connection.recipient_id
-                )
-            else:
-                connected_user_ids.append(
-                    connection.requester_id
-                )
-
-        # Include current user's posts too
-        feed_user_ids = [
-            user_id,
-            *connected_user_ids,
-        ]
-
+        # Community posts are visible across the platform, regardless of
+        # whether the reader is connected to the author.
         query = (
             select(Post)
-            .where(
-                Post.author_id.in_(
-                    feed_user_ids
-                )
-            )
             .order_by(
                 Post.created_at.desc()
             )
