@@ -13,6 +13,11 @@ from app.models.project import (
     ProjectSkill,
     ProjectStatus,
 )
+from app.modules.messaging.models import (
+    Conversation,
+    ConversationParticipant,
+    ConversationType,
+)
 
 from app.schemas.projects import (
     ProjectApplicationCreate,
@@ -639,6 +644,18 @@ def remove_project_member(
             ProjectApplicationStatus.REJECTED
         )
 
+    chat_participants = db.scalars(
+        select(ConversationParticipant)
+        .join(Conversation, Conversation.id == ConversationParticipant.conversation_id)
+        .where(
+            Conversation.project_id == project.id,
+            Conversation.conversation_type == ConversationType.PROJECT,
+            ConversationParticipant.user_id == member_user_id,
+        )
+    ).all()
+    for participant in chat_participants:
+        db.delete(participant)
+
     db.delete(member)
     db.commit()
 
@@ -701,6 +718,18 @@ def leave_project(
         application.status = (
             ProjectApplicationStatus.WITHDRAWN
         )
+
+    chat_participants = db.scalars(
+        select(ConversationParticipant)
+        .join(Conversation, Conversation.id == ConversationParticipant.conversation_id)
+        .where(
+            Conversation.project_id == project.id,
+            Conversation.conversation_type == ConversationType.PROJECT,
+            ConversationParticipant.user_id == user_id,
+        )
+    ).all()
+    for participant in chat_participants:
+        db.delete(participant)
 
     db.delete(member)
     db.commit()

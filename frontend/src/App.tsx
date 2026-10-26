@@ -604,6 +604,8 @@ function PublicProfileScreen({ token, user, memberId, members, onBack, onMessage
 
 type Project = { id: string; creator_id: string; title: string; description: string; domain?: string | null; project_type: string; difficulty: string; status: string; visibility: string; max_team_size?: number | null; is_accepting_members: boolean; start_date?: string | null; end_date?: string | null; created_at: string; skills?: { id: string; skill_id: string; required_level?: number | null }[] }
 type ProjectResource = { id: string; project_id: string; added_by: string; title: string; resource_type: 'repository' | 'document' | 'media' | 'link'; url: string; description?: string | null; file_name?: string | null; content_type?: string | null; created_at: string }
+type ProjectChatMessage = { id: string; project_id: string; sender_id: string; content: string; created_at: string }
+type ProjectMeeting = { id: string; project_id: string; created_by: string; title: string; description?: string | null; starts_at: string; ends_at: string; meeting_url?: string | null; status: 'scheduled' | 'cancelled'; created_at: string; updated_at: string }
 
 function ProjectsScreen({ token, user, members, initialTab = 'discover' }: { token: string; user: User; members: PublicUser[]; initialTab?: 'discover' | 'created' | 'joined' }) {
   const [tab, setTab] = useState<'discover' | 'created' | 'joined'>(initialTab)
@@ -666,9 +668,12 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
   const [project, setProject] = useState<Project | null>(null)
   const [team, setTeam] = useState<{ id: string; user_id: string; role: string; joined_at: string }[]>([])
   const [resources, setResources] = useState<ProjectResource[]>([])
+  const [chatMessages, setChatMessages] = useState<ProjectChatMessage[]>([])
+  const [meetings, setMeetings] = useState<ProjectMeeting[]>([])
   const [applications, setApplications] = useState<{ id: string; user_id: string; message?: string | null; status: string; applied_at: string }[]>([])
   const [application, setApplication] = useState<{ id: string; status: string } | null>(null)
   const [tab, setTab] = useState<'overview' | 'resources' | 'team' | 'applications'>('overview')
+  const [workspacePanel, setWorkspacePanel] = useState<'resources' | 'chat' | 'meetings'>('resources')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [applyOpen, setApplyOpen] = useState(false)
@@ -676,7 +681,11 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
   const [notice, setNotice] = useState('')
   const [resourceKind, setResourceKind] = useState<'repository' | 'document' | 'link'>('repository')
   const [uploadingResources, setUploadingResources] = useState(false)
+  const [chatDraft, setChatDraft] = useState('')
+  const [sendingChat, setSendingChat] = useState(false)
+  const [editingMeetingId, setEditingMeetingId] = useState('')
   const resourceFileInput = useRef<HTMLInputElement>(null)
+  const chatBottom = useRef<HTMLDivElement>(null)
   const owner = project?.creator_id === user.id
   const joined = team.some((member) => member.user_id === user.id)
   const canShareResources = Boolean(owner || joined)
@@ -690,8 +699,13 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
       ])
       setProject(projectData); setTeam(teamData || [])
       if (projectData.creator_id === user.id || teamData.some((member) => member.user_id === user.id)) {
-        setResources(await request<ProjectResource[]>(`/projects/${projectId}/resources`, token))
-      } else setResources([])
+        const [resourceData, chatData, meetingData] = await Promise.all([
+          request<ProjectResource[]>(`/projects/${projectId}/resources`, token),
+          request<ProjectChatMessage[]>(`/projects/${projectId}/chat`, token),
+          request<ProjectMeeting[]>(`/projects/${projectId}/meetings`, token),
+        ])
+        setResources(resourceData); setChatMessages(chatData); setMeetings(meetingData)
+      } else { setResources([]); setChatMessages([]); setMeetings([]) }
       if (projectData.creator_id === user.id) {
         const apps = await request<{ id: string; user_id: string; message?: string | null; status: string; applied_at: string }[]>(`/projects/${projectId}/applications`, token)
         setApplications(apps || [])
@@ -700,6 +714,16 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
     finally { setLoading(false) }
   }
   useEffect(() => { void loadWorkspace() }, [token, projectId])
+
+  useEffect(() => {
+    if (!canShareResources || tab !== 'resources' || workspacePanel !== 'chat') return
+    const timer = window.setInterval(() => {
+      void request<ProjectChatMessage[]>(`/projects/${projectId}/chat`, token).then(setChatMessages).catch(() => undefined)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [canShareResources, projectId, tab, token, workspacePanel])
+
+  useEffect(() => { chatBottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [chatMessages, workspacePanel])
 
   async function submitApplication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!project) return
@@ -771,6 +795,69 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
     finally { setBusy('') }
   }
 
+  async function sendTeamMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const content = chatDraft.trim()
+    if (!content || sendingChat) return
+    setSendingChat(true); setError('')
+    try {
+      const message = await request<ProjectChatMessage>(`/projects/${projectId}/chat`, token, { method: 'POST', body: JSON.stringify({ content }) })
+      setChatMessages((items) => [...items, message]); setChatDraft('')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not send your team message.') }
+    finally { setSendingChat(false) }
+  }
+
+  async function saveProjectMeeting(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = event.currentTarget
+    const data = new FormData(form)
+    const startsAt = new Date(String(data.get('starts_at') || ''))
+    const endsAt = new Date(String(data.get('ends_at') || ''))
+    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) || endsAt <= startsAt) {
+      setError('Choose a valid meeting time. The end must be after the start.')
+      return
+    }
+    const payload = {
+      title: String(data.get('title') || '').trim(),
+      description: String(data.get('description') || '').trim() || null,
+      starts_at: startsAt.toISOString(),
+      ends_at: endsAt.toISOString(),
+      meeting_url: String(data.get('meeting_url') || '').trim() || null,
+    }
+    setBusy('meeting'); setError(''); setNotice('')
+    try {
+      const saved = await request<ProjectMeeting>(
+        `/projects/${projectId}/meetings${editingMeetingId ? `/${editingMeetingId}` : ''}`,
+        token,
+        { method: editingMeetingId ? 'PATCH' : 'POST', body: JSON.stringify(payload) },
+      )
+      setMeetings((items) => [...items.filter((item) => item.id !== saved.id), saved].sort((a, b) => a.starts_at.localeCompare(b.starts_at)))
+      setEditingMeetingId(''); form.reset(); setNotice(editingMeetingId ? 'Meeting details updated.' : 'Meeting scheduled for the project team.')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save this meeting.') }
+    finally { setBusy('') }
+  }
+
+  async function cancelProjectMeeting(meeting: ProjectMeeting) {
+    if (!window.confirm(`Cancel “${meeting.title}”?`)) return
+    setBusy(meeting.id); setError('')
+    try {
+      await request(`/projects/${projectId}/meetings/${meeting.id}`, token, { method: 'PATCH', body: JSON.stringify({ status: 'cancelled' }) })
+      setMeetings((items) => items.map((item) => item.id === meeting.id ? { ...item, status: 'cancelled' } : item)); setNotice('Meeting cancelled.')
+      if (editingMeetingId === meeting.id) setEditingMeetingId('')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not cancel this meeting.') }
+    finally { setBusy('') }
+  }
+
+  function meetingDateValue(value?: string) {
+    if (!value) return ''
+    const date = new Date(value)
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  }
+
+  function personAvatar(id: string) {
+    return id === user.id ? user.avatar_url : members.find((member) => member.id === id)?.avatar_url
+  }
+
   async function removeMember(memberUserId: string) {
     if (!window.confirm(`Remove ${personName(memberUserId)} from this project?`)) return
     setBusy(memberUserId); setError(''); setNotice('')
@@ -782,6 +869,7 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
   }
 
   async function leaveProject() {
+    if (owner) { setError('Project leads cannot leave their own project. Remove collaborators from the Team tab, or close the project.'); return }
     if (!window.confirm('Leave this project team?')) return
     setBusy('leave'); setError('')
     try { await request(`/projects/${projectId}/leave`, token, { method: 'DELETE' }); setNotice('You left the project.'); onBack(); onChanged() }
@@ -801,10 +889,33 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
     <header className="project-workspace-hero"><div className="project-workspace-icon"><Icon name="projects" size={23} /></div><div className="project-workspace-title"><div className="project-workspace-tags"><span>{format(project.project_type)}</span>{project.domain && <span>{project.domain}</span>}<span className={`project-status status-${project.status}`}>{format(project.status)}</span></div><h2>{project.title}</h2><p>Led by {personName(project.creator_id)} · Created {displayDate(project.created_at)}</p></div>{owner && <label className="workspace-status-field"><small>PROJECT STATUS</small><select value={project.status} disabled={busy === 'project'} onChange={(event) => void updateProject({ status: event.target.value }, 'Project status updated.')}><option value="draft">Draft</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label>}</header>
     {error && <div className="inline-error">{error}<button onClick={() => setError('')}>×</button></div>}{notice && <div className="project-notice">{notice}<button onClick={() => setNotice('')}>×</button></div>}
     <div className="workspace-tabs"><button className={tab === 'overview' ? 'workspace-tab-active' : ''} onClick={() => setTab('overview')}>Overview</button>{canShareResources && <button className={tab === 'resources' ? 'workspace-tab-active' : ''} onClick={() => setTab('resources')}>Workspace <span>{resources.length}</span></button>}<button className={tab === 'team' ? 'workspace-tab-active' : ''} onClick={() => setTab('team')}>Team <span>{team.length}</span></button>{owner && <button className={tab === 'applications' ? 'workspace-tab-active' : ''} onClick={() => setTab('applications')}>Applications <span>{pendingApplications.length || applications.length}</span></button>}</div>
-    {tab === 'overview' && <div className="workspace-overview"><article className="workspace-main-card card"><div className="workspace-card-heading"><div><span className="eyebrow">PROJECT BRIEF</span><h3>About this project</h3></div><span className="workspace-difficulty">{format(project.difficulty)}</span></div><p className="workspace-description">{project.description}</p><div className="workspace-facts"><div><small>PROJECT TYPE</small><strong>{format(project.project_type)}</strong></div><div><small>DOMAIN</small><strong>{project.domain || 'Open domain'}</strong></div><div><small>TEAM SIZE</small><strong>{team.length}{project.max_team_size ? ` / ${project.max_team_size}` : ''} members</strong></div><div><small>START DATE</small><strong>{displayDate(project.start_date)}</strong></div><div><small>END DATE</small><strong>{displayDate(project.end_date)}</strong></div><div><small>VISIBILITY</small><strong>{format(project.visibility)}</strong></div></div></article><aside className="workspace-side-card card"><div className="workspace-card-heading"><div><span className="eyebrow">COLLABORATION</span><h3>Build the team</h3></div></div><div className="workspace-team-preview">{team.slice(0, 5).map((member) => <div key={member.id}><Avatar name={personName(member.user_id)} /><span><strong>{personName(member.user_id)}</strong><small>{format(member.role)}</small></span></div>)}</div><button className="workspace-text-link" onClick={() => setTab('team')}>View all {team.length} team members <span>→</span></button>{owner ? <div className="workspace-owner-controls"><label><input type="checkbox" checked={project.is_accepting_members} disabled={busy === 'project'} onChange={(event) => void updateProject({ is_accepting_members: event.target.checked }, event.target.checked ? 'This project is now accepting members.' : 'Applications are paused.')} /><span>Accepting applications</span></label><small>Turn this off to pause new applications.</small></div> : joined ? <button className="workspace-leave-button" disabled={busy === 'leave'} onClick={() => void leaveProject()}>{busy === 'leave' ? 'Leaving…' : 'Leave project'}</button> : <>{application ? <div className="workspace-application-state"><span>✓</span><div><strong>Application {format(application.status)}</strong><small>The project lead will be notified.</small></div></div> : project.is_accepting_members && project.status === 'open' ? <button className="primary-button workspace-apply-cta" onClick={() => setApplyOpen((value) => !value)}>{applyOpen ? 'Close application' : 'Apply to join'} <span>↗</span></button> : <div className="workspace-closed-note">This project is not accepting applications right now.</div>}</>}</aside>
+    {tab === 'overview' && <div className="workspace-overview"><article className="workspace-main-card card"><div className="workspace-card-heading"><div><span className="eyebrow">PROJECT BRIEF</span><h3>About this project</h3></div><span className="workspace-difficulty">{format(project.difficulty)}</span></div><p className="workspace-description">{project.description}</p><div className="workspace-facts"><div><small>PROJECT TYPE</small><strong>{format(project.project_type)}</strong></div><div><small>DOMAIN</small><strong>{project.domain || 'Open domain'}</strong></div><div><small>TEAM SIZE</small><strong>{team.length}{project.max_team_size ? ` / ${project.max_team_size}` : ''} members</strong></div><div><small>START DATE</small><strong>{displayDate(project.start_date)}</strong></div><div><small>END DATE</small><strong>{displayDate(project.end_date)}</strong></div><div><small>VISIBILITY</small><strong>{format(project.visibility)}</strong></div></div></article><aside className="workspace-side-card card"><div className="workspace-card-heading"><div><span className="eyebrow">COLLABORATION</span><h3>Build the team</h3></div></div><div className="workspace-team-preview">{team.slice(0, 5).map((member) => <div key={member.id}><Avatar name={personName(member.user_id)} /><span><strong>{personName(member.user_id)}</strong><small>{format(member.role)}</small></span></div>)}</div><button className="workspace-text-link" onClick={() => setTab('team')}>View all {team.length} team members <span>→</span></button>{owner ? <div className="workspace-owner-controls"><label><input type="checkbox" checked={project.is_accepting_members} disabled={busy === 'project'} onChange={(event) => void updateProject({ is_accepting_members: event.target.checked }, event.target.checked ? 'This project is now accepting members.' : 'Applications are paused.')} /><span>Accepting applications</span></label><small>Turn this off to pause new applications.</small><small className="workspace-owner-note">The project lead stays assigned and cannot leave. Remove collaborators from the Team tab.</small></div> : joined ? <button className="workspace-leave-button" disabled={busy === 'leave'} onClick={() => void leaveProject()}>{busy === 'leave' ? 'Leaving…' : 'Leave project'}</button> : <>{application ? <div className="workspace-application-state"><span>✓</span><div><strong>Application {format(application.status)}</strong><small>The project lead will be notified.</small></div></div> : project.is_accepting_members && project.status === 'open' ? <button className="primary-button workspace-apply-cta" onClick={() => setApplyOpen((value) => !value)}>{applyOpen ? 'Close application' : 'Apply to join'} <span>↗</span></button> : <div className="workspace-closed-note">This project is not accepting applications right now.</div>}</>}</aside>
       {applyOpen && <form className="workspace-application-form card" onSubmit={(event) => void submitApplication(event)}><div className="workspace-card-heading"><div><span className="eyebrow">YOUR APPLICATION</span><h3>Introduce yourself</h3></div></div><p>Tell the project lead what you’d like to contribute or learn.</p><textarea name="message" maxLength={2000} rows={4} placeholder="Share relevant experience, skills, and what interests you about this project." /><div className="project-form-footer"><span>Applications are private to the project team.</span><button className="primary-button" disabled={busy === 'apply'}>{busy === 'apply' ? 'Sending…' : 'Submit application'} <span>↗</span></button></div></form>}</div>}
-    {tab === 'team' && <div className="workspace-team-section"><div className="workspace-section-heading"><div><h3>Project team</h3><p>People collaborating on this project.</p></div><span>{team.length} {team.length === 1 ? 'member' : 'members'}{project.max_team_size ? ` · ${project.max_team_size} max` : ''}</span></div><div className="workspace-member-list">{team.map((member) => <article className="workspace-member card" key={member.id}><Avatar name={personName(member.user_id)} /><span><strong>{personName(member.user_id)}</strong><small>{member.user_id === user.id ? 'You · ' : ''}{format(member.role)} · Joined {new Date(member.joined_at).toLocaleDateString([], { month: 'short', year: 'numeric' })}</small></span>{member.role === 'owner' && <span className="workspace-owner-badge">Project lead</span>}{owner && member.user_id !== user.id && <button className="workspace-remove-member" disabled={busy === member.user_id} onClick={() => void removeMember(member.user_id)}>Remove</button>}</article>)}</div>{!team.length && <div className="projects-empty card"><h3>Your team is taking shape</h3><p>Accepted applicants will appear here.</p></div>}</div>}
-    {tab === 'resources' && canShareResources && <div className="project-shared-workspace"><div className="workspace-section-heading"><div><h3>Shared workspace</h3><p>Keep repositories, useful links, documents, and project media together for your team.</p></div><span>{resources.length} shared</span></div><div className="workspace-share-grid"><form className="workspace-share-link card" onSubmit={(event) => void addWorkspaceLink(event)}><span className="eyebrow">ADD A SHARED LINK</span><label className="project-field">What are you sharing?<select value={resourceKind} onChange={(event) => setResourceKind(event.target.value as typeof resourceKind)}><option value="repository">Code repository</option><option value="document">Document or design</option><option value="link">Reference link</option></select></label><label className="project-field">Title<input name="title" required maxLength={255} placeholder="e.g. GitHub repository" /></label><label className="project-field">URL<input name="url" type="url" required placeholder="https://github.com/your-team/project" /></label><label className="project-field">Notes<textarea name="description" rows={2} maxLength={2000} placeholder="What should teammates know about this link?" /></label><button className="primary-button" disabled={busy === 'resource'}>{busy === 'resource' ? 'Sharing…' : 'Share link'} <span>↗</span></button></form><article className="workspace-share-upload card"><span className="eyebrow">UPLOAD TEAM FILES</span><h3>Share media and documents</h3><p>Upload images, videos, or PDFs for project members. Files are stored with your configured upload provider.</p><input ref={resourceFileInput} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,application/pdf" multiple hidden onChange={(event) => void uploadWorkspaceFiles(event.currentTarget.files)} /><button className="secondary-button" onClick={() => resourceFileInput.current?.click()} disabled={uploadingResources}>{uploadingResources ? 'Uploading…' : 'Choose files'} <span>＋</span></button><small>JPG, PNG, WebP, MP4, WebM, or PDF. Up to 20 MB per file; videos up to 100 MB.</small></article></div><div className="workspace-resource-list">{resources.map((resource) => <article className="workspace-resource card" key={resource.id}>{resource.content_type?.startsWith('image/') && <a href={resource.url} target="_blank" rel="noreferrer" className="workspace-resource-preview"><img src={resource.url} alt={resource.title} loading="lazy" /></a>}{resource.content_type?.startsWith('video/') && <video className="workspace-resource-preview" src={resource.url} controls preload="metadata" />}{resource.content_type === 'application/pdf' && <span className="workspace-resource-file-mark">PDF</span>}<div className="workspace-resource-copy"><span className="workspace-resource-type">{resource.resource_type === 'repository' ? '⌘ REPOSITORY' : resource.resource_type.toUpperCase()}</span><a href={resource.url} target="_blank" rel="noreferrer"><strong>{resource.title}</strong><span>↗</span></a>{resource.description && <p>{resource.description}</p>}<small>Shared by {personName(resource.added_by)} · {timeAgo(resource.created_at)}{resource.file_name ? ` · ${resource.file_name}` : ''}</small></div>{(owner || resource.added_by === user.id) && <button className="remove-item workspace-resource-remove" aria-label={`Remove ${resource.title}`} disabled={busy === resource.id} onClick={() => void removeWorkspaceResource(resource)}>×</button>}</article>)}{resources.length === 0 && <div className="projects-empty card"><span className="message-empty-icon"><Icon name="projects" size={21} /></span><h3>Your project resources will live here</h3><p>Share the repository, reference material, and files your team needs to work together.</p></div>}</div></div>}
+    {tab === 'team' && <div className="workspace-team-section"><div className="workspace-section-heading"><div><h3>Project team</h3><p>People collaborating on this project.</p>{owner && <p className="workspace-owner-note">You are the project lead. Use Remove beside a teammate to revoke their access.</p>}</div><span>{team.length} {team.length === 1 ? 'member' : 'members'}{project.max_team_size ? ` · ${project.max_team_size} max` : ''}</span></div><div className="workspace-member-list">{team.map((member) => <article className="workspace-member card" key={member.id}><Avatar name={personName(member.user_id)} /><span><strong>{personName(member.user_id)}</strong><small>{member.user_id === user.id ? 'You · ' : ''}{format(member.role)} · Joined {new Date(member.joined_at).toLocaleDateString([], { month: 'short', year: 'numeric' })}</small></span>{member.role === 'owner' && <span className="workspace-owner-badge">Project lead</span>}{owner && member.user_id !== user.id && <button className="workspace-remove-member" disabled={busy === member.user_id} onClick={() => void removeMember(member.user_id)}>Remove</button>}</article>)}</div>{!team.length && <div className="projects-empty card"><h3>Your team is taking shape</h3><p>Accepted applicants will appear here.</p></div>}</div>}
+    {tab === 'resources' && canShareResources && <>
+      <div className="workspace-subtabs" role="tablist" aria-label="Project workspace sections">
+        <button type="button" role="tab" aria-selected={workspacePanel === 'resources'} className={workspacePanel === 'resources' ? 'active' : ''} onClick={() => setWorkspacePanel('resources')}>Shared items <span>{resources.length}</span></button>
+        <button type="button" role="tab" aria-selected={workspacePanel === 'chat'} className={workspacePanel === 'chat' ? 'active' : ''} onClick={() => setWorkspacePanel('chat')}>Team chat <span>{chatMessages.length}</span></button>
+        <button type="button" role="tab" aria-selected={workspacePanel === 'meetings'} className={workspacePanel === 'meetings' ? 'active' : ''} onClick={() => setWorkspacePanel('meetings')}>Meetings <span>{meetings.length}</span></button>
+      </div>
+      <div className="project-shared-workspace" style={{ display: workspacePanel === 'resources' ? 'grid' : 'none' }}><div className="workspace-section-heading"><div><h3>Shared workspace</h3><p>Keep repositories, useful links, documents, and project media together for your team.</p></div><span>{resources.length} shared</span></div><div className="workspace-share-grid"><form className="workspace-share-link card" onSubmit={(event) => void addWorkspaceLink(event)}><span className="eyebrow">ADD A SHARED LINK</span><label className="project-field">What are you sharing?<select value={resourceKind} onChange={(event) => setResourceKind(event.target.value as typeof resourceKind)}><option value="repository">Code repository</option><option value="document">Document or design</option><option value="link">Reference link</option></select></label><label className="project-field">Title<input name="title" required maxLength={255} placeholder="e.g. GitHub repository" /></label><label className="project-field">URL<input name="url" type="url" required placeholder="https://github.com/your-team/project" /></label><label className="project-field">Notes<textarea name="description" rows={2} maxLength={2000} placeholder="What should teammates know about this link?" /></label><button className="primary-button" disabled={busy === 'resource'}>{busy === 'resource' ? 'Sharing…' : 'Share link'} <span>↗</span></button></form><article className="workspace-share-upload card"><span className="eyebrow">UPLOAD TEAM FILES</span><h3>Share media and documents</h3><p>Upload images, videos, or PDFs for project members. Files are stored with your configured upload provider.</p><input ref={resourceFileInput} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,application/pdf" multiple hidden onChange={(event) => void uploadWorkspaceFiles(event.currentTarget.files)} /><button className="secondary-button" onClick={() => resourceFileInput.current?.click()} disabled={uploadingResources}>{uploadingResources ? 'Uploading…' : 'Choose files'} <span>＋</span></button><small>JPG, PNG, WebP, MP4, WebM, or PDF. Up to 20 MB per file; videos up to 100 MB.</small></article></div><div className="workspace-resource-list">{resources.map((resource) => <article className="workspace-resource card" key={resource.id}>{resource.content_type?.startsWith('image/') && <a href={resource.url} target="_blank" rel="noreferrer" className="workspace-resource-preview"><img src={resource.url} alt={resource.title} loading="lazy" /></a>}{resource.content_type?.startsWith('video/') && <video className="workspace-resource-preview" src={resource.url} controls preload="metadata" />}{resource.content_type === 'application/pdf' && <span className="workspace-resource-file-mark">PDF</span>}<div className="workspace-resource-copy"><span className="workspace-resource-type">{resource.resource_type === 'repository' ? '⌘ REPOSITORY' : resource.resource_type.toUpperCase()}</span><a href={resource.url} target="_blank" rel="noreferrer"><strong>{resource.title}</strong><span>↗</span></a>{resource.description && <p>{resource.description}</p>}<small>Shared by {personName(resource.added_by)} · {timeAgo(resource.created_at)}{resource.file_name ? ` · ${resource.file_name}` : ''}</small></div>{(owner || resource.added_by === user.id) && <button className="remove-item workspace-resource-remove" aria-label={`Remove ${resource.title}`} disabled={busy === resource.id} onClick={() => void removeWorkspaceResource(resource)}>×</button>}</article>)}{resources.length === 0 && <div className="projects-empty card"><span className="message-empty-icon"><Icon name="projects" size={21} /></span><h3>Your project resources will live here</h3><p>Share the repository, reference material, and files your team needs to work together.</p></div>}</div></div>
+      {workspacePanel === 'chat' && <section className="workspace-chat-panel card">
+        <header className="workspace-chat-header"><div><span className="eyebrow">PROJECT CONVERSATION</span><h3>{project.title} team chat</h3><p>A shared space for quick updates, questions, and decisions.</p></div><span className="workspace-chat-count">{team.length} teammates</span></header>
+        <div className="workspace-chat-log" aria-live="polite">
+          {chatMessages.map((message) => <article className={`workspace-chat-message ${message.sender_id === user.id ? 'mine' : ''}`} key={message.id}><Avatar name={personName(message.sender_id)} imageUrl={personAvatar(message.sender_id)} /><div><small>{personName(message.sender_id)} · {timeAgo(message.created_at)}</small><p>{message.content}</p></div></article>)}
+          {chatMessages.length === 0 && <div className="workspace-chat-empty"><span>✳</span><strong>Start the team conversation</strong><p>Share a progress update or ask your collaborators a question.</p></div>}
+          <div ref={chatBottom} />
+        </div>
+        <form className="workspace-chat-compose" onSubmit={(event) => void sendTeamMessage(event)}><textarea value={chatDraft} onChange={(event) => setChatDraft(event.target.value)} rows={2} maxLength={5000} placeholder="Message the project team…" aria-label="Message the project team" /><button className="primary-button" disabled={!chatDraft.trim() || sendingChat}>{sendingChat ? 'Sending…' : 'Send'} <span>↑</span></button></form>
+      </section>}
+      {workspacePanel === 'meetings' && <section className="workspace-meetings-panel">
+        <div className="workspace-section-heading"><div><h3>Team meetings</h3><p>Keep the next project check-in clear for everyone.</p></div><span>{meetings.length} scheduled</span></div>
+        <div className="workspace-meetings-layout">
+          {owner ? <form className="workspace-meeting-form card" key={editingMeetingId || 'new-meeting'} onSubmit={(event) => void saveProjectMeeting(event)}><span className="eyebrow">{editingMeetingId ? 'UPDATE THE PLAN' : 'OWNER SCHEDULING'}</span><h3>{editingMeetingId ? 'Edit meeting' : 'Schedule a meeting'}</h3><label className="project-field">Meeting title<input name="title" required maxLength={255} defaultValue={meetings.find((meeting) => meeting.id === editingMeetingId)?.title || ''} placeholder="Weekly project check-in" /></label><label className="project-field">Starts<input name="starts_at" type="datetime-local" required defaultValue={meetingDateValue(meetings.find((meeting) => meeting.id === editingMeetingId)?.starts_at)} /></label><label className="project-field">Ends<input name="ends_at" type="datetime-local" required defaultValue={meetingDateValue(meetings.find((meeting) => meeting.id === editingMeetingId)?.ends_at)} /></label><label className="project-field">Meeting link (optional)<input name="meeting_url" type="url" defaultValue={meetings.find((meeting) => meeting.id === editingMeetingId)?.meeting_url || ''} placeholder="https://meet.google.com/…" /></label><label className="project-field">Agenda or notes<textarea name="description" rows={3} maxLength={2000} defaultValue={meetings.find((meeting) => meeting.id === editingMeetingId)?.description || ''} placeholder="What should the team prepare?" /></label><div className="workspace-meeting-actions"><button className="primary-button" disabled={busy === 'meeting'}>{busy === 'meeting' ? 'Saving…' : editingMeetingId ? 'Save changes' : 'Schedule meeting'} <span>→</span></button>{editingMeetingId && <button type="button" className="decline-request" onClick={() => setEditingMeetingId('')}>Cancel edit</button>}</div><small>Only the project lead can schedule, change, or cancel meetings. Times use {Intl.DateTimeFormat().resolvedOptions().timeZone}.</small></form> : <div className="workspace-meeting-owner-note card"><span>◷</span><strong>Meetings are managed by the project lead</strong><p>You can view meeting details and join using the shared link.</p></div>}
+          <div className="workspace-meeting-list">{meetings.map((meeting) => <article className="workspace-meeting-card card" key={meeting.id}><div className="workspace-meeting-date"><span>{new Date(meeting.starts_at).toLocaleDateString([], { month: 'short' })}</span><strong>{new Date(meeting.starts_at).toLocaleDateString([], { day: 'numeric' })}</strong></div><div className="workspace-meeting-copy"><div><span className="workspace-resource-type">{meeting.status === 'cancelled' ? 'CANCELLED' : 'TEAM MEETING'}</span><strong>{meeting.title}</strong></div><p>{new Date(meeting.starts_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} – {new Date(meeting.ends_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</p>{meeting.description && <small>{meeting.description}</small>}{meeting.meeting_url && <a href={meeting.meeting_url} target="_blank" rel="noreferrer">Join meeting <span>↗</span></a>}</div>{owner && meeting.status === 'scheduled' && <div className="workspace-meeting-controls"><button type="button" onClick={() => { setEditingMeetingId(meeting.id); window.setTimeout(() => document.querySelector('.workspace-meeting-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50) }}>Edit</button><button type="button" disabled={busy === meeting.id} onClick={() => void cancelProjectMeeting(meeting)}>Cancel</button></div>}</article>)}{meetings.length === 0 && <div className="projects-empty card"><span className="message-empty-icon">◷</span><h3>No meetings scheduled</h3><p>{owner ? 'Schedule a check-in to help your team stay aligned.' : 'The project lead will post meeting details here.'}</p></div>}</div>
+        </div>
+      </section>}
+    </>}
     {tab === 'applications' && owner && <div className="workspace-applications"><div className="workspace-section-heading"><div><h3>Applications</h3><p>Review people who want to contribute to your project.</p></div><span>{pendingApplications.length} pending · {applications.length} total</span></div>{applications.length ? <div className="workspace-application-list">{applications.map((item) => <article className="workspace-applicant card" key={item.id}><Avatar name={personName(item.user_id)} /><div><strong>{personName(item.user_id)}</strong><small>Applied {new Date(item.applied_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</small><p>{item.message || 'No introduction provided.'}</p></div><span className={`mentorship-status mentorship-${item.status}`}>{format(item.status)}</span>{item.status === 'pending' && <div className="workspace-applicant-actions"><button className="primary-button" disabled={busy === item.id} onClick={() => void applicationDecision(item.id, 'accept')}>Accept</button><button className="decline-request" disabled={busy === item.id} onClick={() => void applicationDecision(item.id, 'reject')}>Decline</button></div>}</article>)}</div> : <div className="projects-empty card"><span className="message-empty-icon"><Icon name="network" size={21} /></span><h3>No applications yet</h3><p>When people apply, you’ll be able to review their introductions and invite them to the team here.</p></div>}</div>}
   </section>
 }

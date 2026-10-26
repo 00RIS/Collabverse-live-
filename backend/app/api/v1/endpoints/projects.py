@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
 
@@ -20,13 +21,19 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.uploads import save_upload
 from app.db.session import get_db
-from app.models.project import Project, ProjectMember, ProjectResource
+from app.models.project import Project, ProjectMeeting, ProjectMember, ProjectResource
 from app.models.project import (
     ProjectDifficulty,
     ProjectStatus,
     ProjectType,
 )
 from app.models.user import User
+from app.modules.messaging.models import (
+    Conversation,
+    ConversationParticipant,
+    ConversationType,
+    Message,
+)
 from app.schemas.projects import (
     ProjectApplicationCreate,
     ProjectApplicationResponse,
@@ -35,6 +42,11 @@ from app.schemas.projects import (
     ProjectResponse,
     ProjectResourceCreate,
     ProjectResourceResponse,
+    ProjectChatMessageCreate,
+    ProjectChatMessageResponse,
+    ProjectMeetingCreate,
+    ProjectMeetingResponse,
+    ProjectMeetingUpdate,
     ProjectUpdate,
 )
 from app.services.projects import (
@@ -86,6 +98,45 @@ def require_workspace_member(project: Project, user: User, db: Session) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Join this project to access its shared workspace.",
         )
+
+
+def get_project_chat_conversation(project: Project, db: Session) -> Conversation:
+    conversation = db.scalar(
+        select(Conversation).where(
+            Conversation.project_id == project.id,
+            Conversation.conversation_type == ConversationType.PROJECT,
+        )
+    )
+    if conversation is None:
+        conversation = Conversation(
+            conversation_type=ConversationType.PROJECT,
+            title=project.title,
+            project_id=project.id,
+            created_by=project.creator_id,
+        )
+        db.add(conversation)
+        db.flush()
+
+    active_member_ids = set(
+        db.scalars(
+            select(ProjectMember.user_id).where(ProjectMember.project_id == project.id)
+        ).all()
+    )
+    participants = list(
+        db.scalars(
+            select(ConversationParticipant).where(
+                ConversationParticipant.conversation_id == conversation.id
+            )
+        ).all()
+    )
+    participant_ids = {participant.user_id for participant in participants}
+    for user_id in active_member_ids - participant_ids:
+        db.add(ConversationParticipant(conversation_id=conversation.id, user_id=user_id))
+    for participant in participants:
+        if participant.user_id not in active_member_ids:
+            db.delete(participant)
+    db.flush()
+    return conversation
 
 
 # =========================================================
@@ -642,5 +693,185 @@ def delete_project_resource_endpoint(
     if resource.added_by != current_user.id and project.creator_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can remove only resources you added.")
     db.delete(resource)
+    db.commit()
+    return None
+
+
+@router.get(
+    "/{project_id}/chat",
+    response_model=list[ProjectChatMessageResponse],
+)
+def get_project_chat_endpoint(
+    project_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+    conversation = get_project_chat_conversation(project, db)
+    db.commit()
+    messages = list(
+        db.scalars(
+            select(Message)
+            .where(Message.conversation_id == conversation.id)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        ).all()
+    )
+    messages.reverse()
+    return [
+        {
+            "id": message.id,
+            "project_id": project.id,
+            "sender_id": message.sender_id,
+            "content": message.content,
+            "created_at": message.created_at,
+        }
+        for message in messages
+    ]
+
+
+@router.post(
+    "/{project_id}/chat",
+    response_model=ProjectChatMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def send_project_chat_message_endpoint(
+    project_id: uuid.UUID,
+    data: ProjectChatMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+    content = data.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="Message cannot be empty.")
+    conversation = get_project_chat_conversation(project, db)
+    message = Message(
+        conversation_id=conversation.id,
+        sender_id=current_user.id,
+        content=content,
+    )
+    conversation.updated_at = datetime.now(timezone.utc)
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return {
+        "id": message.id,
+        "project_id": project.id,
+        "sender_id": message.sender_id,
+        "content": message.content,
+        "created_at": message.created_at,
+    }
+
+
+@router.get(
+    "/{project_id}/meetings",
+    response_model=list[ProjectMeetingResponse],
+)
+def list_project_meetings_endpoint(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+    return list(
+        db.scalars(
+            select(ProjectMeeting)
+            .where(ProjectMeeting.project_id == project.id)
+            .order_by(ProjectMeeting.starts_at.asc())
+        ).all()
+    )
+
+
+@router.post(
+    "/{project_id}/meetings",
+    response_model=ProjectMeetingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_project_meeting_endpoint(
+    project_id: uuid.UUID,
+    data: ProjectMeetingCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_owner(project, current_user.id)
+    meeting = ProjectMeeting(
+        project_id=project.id,
+        created_by=current_user.id,
+        title=data.title.strip(),
+        description=data.description.strip() if data.description else None,
+        starts_at=data.starts_at,
+        ends_at=data.ends_at,
+        meeting_url=str(data.meeting_url) if data.meeting_url else None,
+    )
+    db.add(meeting)
+    db.commit()
+    db.refresh(meeting)
+    return meeting
+
+
+@router.patch(
+    "/{project_id}/meetings/{meeting_id}",
+    response_model=ProjectMeetingResponse,
+)
+def update_project_meeting_endpoint(
+    project_id: uuid.UUID,
+    meeting_id: uuid.UUID,
+    data: ProjectMeetingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_owner(project, current_user.id)
+    meeting = db.scalar(
+        select(ProjectMeeting).where(
+            ProjectMeeting.id == meeting_id,
+            ProjectMeeting.project_id == project.id,
+        )
+    )
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Project meeting not found.")
+    changes = data.model_dump(exclude_unset=True)
+    if "starts_at" in changes and changes["starts_at"] is None:
+        raise HTTPException(status_code=422, detail="Meeting start time is required.")
+    if "ends_at" in changes and changes["ends_at"] is None:
+        raise HTTPException(status_code=422, detail="Meeting end time is required.")
+    starts_at = changes.get("starts_at", meeting.starts_at)
+    ends_at = changes.get("ends_at", meeting.ends_at)
+    if ends_at <= starts_at:
+        raise HTTPException(status_code=422, detail="Meeting end time must be after its start time.")
+    for key, value in changes.items():
+        setattr(meeting, key, str(value) if key == "meeting_url" and value else value)
+    db.commit()
+    db.refresh(meeting)
+    return meeting
+
+
+@router.delete(
+    "/{project_id}/meetings/{meeting_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def cancel_project_meeting_endpoint(
+    project_id: uuid.UUID,
+    meeting_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_owner(project, current_user.id)
+    meeting = db.scalar(
+        select(ProjectMeeting).where(
+            ProjectMeeting.id == meeting_id,
+            ProjectMeeting.project_id == project.id,
+        )
+    )
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Project meeting not found.")
+    meeting.status = "cancelled"
     db.commit()
     return None

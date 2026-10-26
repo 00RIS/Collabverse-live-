@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 
 from app.models.project import (
     ProjectApplicationStatus,
@@ -175,6 +175,57 @@ class ProjectResourceResponse(BaseModel):
     file_name: str | None
     content_type: str | None
     created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectChatMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=5000)
+
+
+class ProjectChatMessageResponse(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    sender_id: uuid.UUID
+    content: str
+    created_at: datetime
+
+
+class ProjectMeetingCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    starts_at: datetime
+    ends_at: datetime
+    meeting_url: AnyHttpUrl | None = None
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Meeting end time must be after its start time.")
+        return self
+
+
+class ProjectMeetingUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    meeting_url: AnyHttpUrl | None = None
+    status: Literal["scheduled", "cancelled"] | None = None
+
+
+class ProjectMeetingResponse(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    created_by: uuid.UUID
+    title: str
+    description: str | None
+    starts_at: datetime
+    ends_at: datetime
+    meeting_url: str | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 

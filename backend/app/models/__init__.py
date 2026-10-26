@@ -36,6 +36,7 @@ from app.models.project import (  # noqa: F401
     ProjectStatus,
     ProjectVisibility,
     ProjectResource,
+    ProjectMeeting,
 )
 from app.models.internship import (  # noqa: F401
     Internship,
