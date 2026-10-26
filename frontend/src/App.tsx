@@ -1055,7 +1055,9 @@ type Hackathon = { id: string; title: string; description: string; domain?: stri
 function HackathonsScreen({ token }: { token: string }) {
   const [items, setItems] = useState<Hackathon[]>([])
   const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState('')
+  const [syncNotice, setSyncNotice] = useState('')
   const [query, setQuery] = useState('')
   useEffect(() => {
     let live = true
@@ -1065,10 +1067,26 @@ function HackathonsScreen({ token }: { token: string }) {
       .finally(() => { if (live) setLoading(false) })
     return () => { live = false }
   }, [token])
+  async function refreshListings() {
+    setSyncing(true)
+    setError('')
+    setSyncNotice('')
+    try {
+      const sync = await request<{ fetched: number; created: number; updated: number }>('/hackathons/sync/unstop?max_pages=2&per_page=18', token, { method: 'POST' })
+      const result = await request<{ total: number; hackathons: Hackathon[] }>('/hackathons?limit=100&offset=0', token)
+      setItems(result.hackathons || [])
+      const saved = sync.created + sync.updated
+      setSyncNotice(saved ? `Found ${sync.fetched} listings and added or refreshed ${saved}.` : 'No new open hackathons were found. Try again later.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not refresh hackathon listings.')
+    } finally {
+      setSyncing(false)
+    }
+  }
   const filtered = items.filter((item) => `${item.title} ${item.description} ${item.domain || ''} ${item.organizer_name || ''}`.toLowerCase().includes(query.trim().toLowerCase()))
   const date = (value?: string | null) => value ? new Date(value).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : ''
   const label = (value: string) => value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
-  return <section className="hackathons-page"><div className="hackathons-banner"><span className="hackathons-banner-icon"><Icon name="assessment" size={23} /></span><div><span className="eyebrow">BUILD, LEARN, COMPETE</span><h2>Find your next hackathon</h2><p>Explore challenges and meet collaborators who are ready to build.</p></div></div><label className="hackathons-search"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by challenge, domain, or organizer" /></label>{error && <div className="inline-error">{error}<button onClick={() => setError('')}>×</button></div>}{loading ? <div className="projects-loading card"><span className="loading-spinner" /><p>Finding hackathons…</p></div> : filtered.length ? <div className="hackathon-grid">{filtered.map((item) => <article className="hackathon-card card" key={item.id}>{item.banner_url && <img className="hackathon-banner-image" src={item.banner_url} alt="" loading="lazy" />}<div className="hackathon-card-body"><div className="hackathon-card-meta"><span>{item.domain || 'Open challenge'}</span><span className={`project-status status-${item.status}`}>{label(item.status)}</span></div><h3>{item.title}</h3><p>{item.description}</p><div className="hackathon-details"><span>{label(item.mode)}{item.location ? ` · ${item.location}` : ''}</span><span>Team {item.min_team_size}–{item.max_team_size}</span>{item.registration_deadline && <span>Register by {date(item.registration_deadline)}</span>}{item.organizer_name && <span>By {item.organizer_name}</span>}{item.prize_details && <span>{item.prize_details}</span>}</div><footer><small>{item.source_name || 'CollabVerse'}{item.start_date ? ` · ${date(item.start_date)}` : ''}</small>{(item.registration_url || item.source_url) && <a href={item.registration_url || item.source_url || '#'} target="_blank" rel="noreferrer">View challenge <span>↗</span></a>}</footer></div></article>)}</div> : <div className="empty-state card"><div className="empty-illustration"><Icon name="assessment" size={20} /></div><h2>{query ? 'No matching hackathons' : 'No hackathons listed yet'}</h2><p>{query ? 'Try a different challenge, domain, or organizer.' : 'New challenges will appear here when they’re added to the community.'}</p></div>}</section>
+  return <section className="hackathons-page"><div className="hackathons-banner"><span className="hackathons-banner-icon"><Icon name="assessment" size={23} /></span><div className="hackathons-banner-copy"><span className="eyebrow">BUILD, LEARN, COMPETE</span><h2>Find your next hackathon</h2><p>Explore challenges and meet collaborators who are ready to build.</p></div><button className="hackathons-sync-button" onClick={() => void refreshListings()} disabled={syncing}>{syncing ? 'Finding listings…' : 'Refresh listings'}</button></div><label className="hackathons-search"><Icon name="search" size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by challenge, domain, or organizer" /></label>{syncNotice && <p className="hackathons-sync-notice" role="status">{syncNotice}</p>}{error && <div className="inline-error">{error}<button onClick={() => setError('')}>×</button></div>}{loading ? <div className="projects-loading card"><span className="loading-spinner" /><p>Finding hackathons…</p></div> : filtered.length ? <div className="hackathon-grid">{filtered.map((item) => <article className="hackathon-card card" key={item.id}>{item.banner_url && <img className="hackathon-banner-image" src={item.banner_url} alt="" loading="lazy" />}<div className="hackathon-card-body"><div className="hackathon-card-meta"><span>{item.domain || 'Open challenge'}</span><span className={`project-status status-${item.status}`}>{label(item.status)}</span></div><h3>{item.title}</h3><p>{item.description}</p><div className="hackathon-details"><span>{label(item.mode)}{item.location ? ` · ${item.location}` : ''}</span><span>Team {item.min_team_size}–{item.max_team_size}</span>{item.registration_deadline && <span>Register by {date(item.registration_deadline)}</span>}{item.organizer_name && <span>By {item.organizer_name}</span>}{item.prize_details && <span>{item.prize_details}</span>}</div><footer><small>{item.source_name || 'CollabVerse'}{item.start_date ? ` · ${date(item.start_date)}` : ''}</small>{(item.registration_url || item.source_url) && <a href={item.registration_url || item.source_url || '#'} target="_blank" rel="noreferrer">View challenge <span>↗</span></a>}</footer></div></article>)}</div> : <div className="empty-state card"><div className="empty-illustration"><Icon name="assessment" size={20} /></div><h2>{query ? 'No matching hackathons' : 'No hackathons listed yet'}</h2><p>{query ? 'Try a different challenge, domain, or organizer.' : 'Use “Refresh listings” to look for current challenges from Unstop.'}</p>{!query && <button className="hackathons-empty-refresh" onClick={() => void refreshListings()} disabled={syncing}>{syncing ? 'Finding listings…' : 'Find hackathons'}</button>}</div>}</section>
 }
 
 function MemberCard({ person, actionLabel, onAction, onOpenProfile, secondaryLabel, onSecondary, disabled = false }: { person: PublicUser; actionLabel: string; onAction?: () => void; onOpenProfile?: () => void; secondaryLabel?: string; onSecondary?: () => void; disabled?: boolean }) {
