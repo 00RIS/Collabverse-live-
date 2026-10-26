@@ -1,3 +1,4 @@
+import logging
 import uuid
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
@@ -42,6 +43,7 @@ router = APIRouter(
     prefix="/posts",
     tags=["posts"],
 )
+logger = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_VIDEO_BYTES = 100 * 1024 * 1024
@@ -125,6 +127,7 @@ def upload_post_media(
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("Post media storage failed for user %s", current_user.id)
         raise HTTPException(status_code=503, detail="Could not store the upload. Check the configured upload storage and try again.") from exc
     finally:
         file.file.close()
