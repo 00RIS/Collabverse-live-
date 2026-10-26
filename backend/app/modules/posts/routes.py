@@ -121,7 +121,7 @@ def upload_post_media(
                 output.write(chunk)
             if total == 0:
                 raise HTTPException(status_code=400, detail="The selected file is empty.")
-            save_upload(output, f"posts/{stored_name}", media_config[0])
+            hosted_url = save_upload(output, f"posts/{stored_name}", media_config[0])
     except HTTPException:
         raise
     except Exception as exc:
@@ -129,7 +129,7 @@ def upload_post_media(
     finally:
         file.file.close()
 
-    media_url = f"{str(request.base_url).rstrip('/')}/uploads/posts/{stored_name}"
+    media_url = hosted_url or f"{str(request.base_url).rstrip('/')}/uploads/posts/{stored_name}"
     return {"media_url": media_url, "media_type": media_type}
 
 

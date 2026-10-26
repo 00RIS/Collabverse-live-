@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # Optional Google Cloud Storage bucket for persistent user uploads.
     # When empty, uploads are stored on the local filesystem for development.
     GCS_BUCKET_NAME: str = ""
+    # Optional service-account JSON for hosting providers without Google ADC.
+    GCS_SERVICE_ACCOUNT_JSON: str = ""
+    # Optional Cloudinary credentials; when all are set, Cloudinary is preferred.
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+    UPLOADS_DIR: str = ""
 
     # JWT authentication
     SECRET_KEY: str
@@ -30,6 +37,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:8000/api/v1/auth/google/callback"
     )
     FRONTEND_URL: str = "http://127.0.0.1:5173"
+    CORS_ORIGINS: str = ""
 
     # Gemini AI
     GEMINI_API_KEY: str

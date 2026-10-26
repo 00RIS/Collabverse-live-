@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings
-from app.core.uploads import save_upload
+from app.core.uploads import UPLOAD_ROOT, save_upload
 from app.db.session import get_db
 from app.models.user import User, UserRole
 
@@ -32,7 +32,7 @@ router = APIRouter(
     tags=["Profiles"],
 )
 
-AVATAR_DIR = Path(__file__).resolve().parents[3] / "uploads" / "avatars"
+AVATAR_DIR = UPLOAD_ROOT / "avatars"
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 AVATAR_TYPES = {
     ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
@@ -131,9 +131,9 @@ def upload_profile_avatar(
                 output.write(chunk)
             if total == 0:
                 raise HTTPException(status_code=400, detail="The selected file is empty.")
-            save_upload(output, f"avatars/{stored_name}", config[0])
+            hosted_url = save_upload(output, f"avatars/{stored_name}", config[0])
         old_url = current_user.avatar_url
-        current_user.avatar_url = f"{str(request.base_url).rstrip('/')}/uploads/avatars/{stored_name}"
+        current_user.avatar_url = hosted_url or f"{str(request.base_url).rstrip('/')}/uploads/avatars/{stored_name}"
         db.commit()
         db.refresh(current_user)
         if old_url and "/uploads/avatars/" in old_url and not settings.GCS_BUCKET_NAME:
