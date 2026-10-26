@@ -80,7 +80,7 @@ function App() {
   const [error, setError] = useState('')
   const [authMode, setAuthMode] = useState<'login' | 'register'>(() => window.location.pathname === '/register' ? 'register' : 'login')
   const [googleSignupCode, setGoogleSignupCode] = useState('')
-  const [activeNav, setActiveNav] = useState('Home')
+  const [activeNav, setActiveNavState] = useState('Home')
   const [projectsInitialTab, setProjectsInitialTab] = useState<'discover' | 'created'>('discover')
   const [viewingProfileId, setViewingProfileId] = useState('')
   const [messageMemberId, setMessageMemberId] = useState('')
@@ -91,6 +91,11 @@ function App() {
   const [attachmentPreviews, setAttachmentPreviews] = useState<{ file: File; url: string; mediaType: 'image' | 'video' }[]>([])
   const [attachmentError, setAttachmentError] = useState('')
   const [uploadProgress, setUploadProgress] = useState('')
+
+  function setActiveNav(destination: string) {
+    setViewingProfileId('')
+    setActiveNavState(destination)
+  }
 
   useEffect(() => {
     const previews = attachments.map((file) => ({ file, url: URL.createObjectURL(file), mediaType: file.type.startsWith('video/') ? 'video' as const : 'image' as const }))
