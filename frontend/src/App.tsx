@@ -70,10 +70,7 @@ function BrandLogo({ href = '#home', onClick }: { href?: string; onClick?: () =>
 }
 
 function App() {
-  const [token, setToken] = useState(() => {
-    const path = window.location.pathname
-    return path === '/login' || path === '/register' ? '' : localStorage.getItem('cv_access_token') || ''
-  })
+  const [token, setToken] = useState(() => localStorage.getItem('cv_access_token') || '')
   const [onboardingPending, setOnboardingPending] = useState(() => localStorage.getItem('cv_onboarding_pending') === 'true')
   const [user, setUser] = useState<User | null>(null)
   const [posts, setPosts] = useState<Post[]>([])
@@ -150,7 +147,11 @@ function App() {
       const visibleIds = new Set(visibleDirectory.map((member) => member.id))
       const testAccountIds = new Set(directory.filter(isTestAccount).map((member) => member.id))
       setUser({ ...current, profile }); setMembers(visibleDirectory); setSavedPostIds(savedIds); setPosts((home.feed || []).filter((post) => !testAccountIds.has(post.author_id)).map((post) => ({ ...post, media: mediaByPost.get(post.id) || [] })))
+      if (window.location.pathname === '/login' || window.location.pathname === '/register') {
+        window.history.replaceState({}, '', '/')
+      }
     } catch (reason) {
+      if (localStorage.getItem('cv_access_token') !== accessToken) return
       localStorage.removeItem('cv_access_token'); setToken(''); setUser(null)
       setError(reason instanceof Error ? reason.message : 'Could not load your feed.')
     } finally { setLoading(false) }
@@ -262,6 +263,7 @@ function App() {
 
   function signOut() { localStorage.removeItem('cv_access_token'); localStorage.removeItem('cv_onboarding_pending'); setToken(''); setOnboardingPending(false); setUser(null); setPosts([]); setMembers([]); setSavedPostIds([]); setViewingProfileId(''); setAuthMode('login'); window.history.replaceState({}, '', '/login') }
 
+  if (token && !user) return <main className="session-restoring" aria-live="polite" aria-busy="true"><BrandLogo href="/" /><span className="loading-spinner" /><p>Restoring your CollabVerse session…</p></main>
   if (!token || !user) return <AuthScreen mode={authMode} setMode={(mode) => { setAuthMode(mode); window.history.replaceState({}, '', mode === 'login' ? '/login' : '/register'); if (mode === 'login') setGoogleSignupCode('') }} onSubmit={authenticate} error={error} googleSignupCode={googleSignupCode} />
   if (onboardingPending) return <OnboardingScreen token={token} user={user} onComplete={() => { localStorage.removeItem('cv_onboarding_pending'); setOnboardingPending(false); setActiveNav('Home') }} />
 
