@@ -1,14 +1,30 @@
 import json
-from typing import Any
+import logging
+from typing import Any, TypedDict
 
 from fastapi import HTTPException
 from google import genai
+from google.genai import types
 
 from app.core.config import settings
 from app.modules.daily_assessment.prompts import (
     DAILY_ASSESSMENT_SYSTEM_PROMPT,
     build_daily_assessment_prompt,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class GeneratedQuestion(TypedDict):
+    skill: str
+    difficulty: str
+    question: str
+    options: list[str]
+    correct_index: int
+
+
+class GeneratedAssessment(TypedDict):
+    questions: list[GeneratedQuestion]
 
 
 class DailyAssessmentGenerator:
@@ -59,13 +75,22 @@ class DailyAssessmentGenerator:
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=GeneratedAssessment,
+                    max_output_tokens=8192,
+                ),
             )
 
         except Exception as exc:
+            logger.exception(
+                "Gemini failed to generate the daily assessment"
+            )
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "AI assessment generation failed."
+                    "AI assessment generation is temporarily unavailable. "
+                    "Check Gemini API access or quota, then try again."
                 ),
             ) from exc
 
