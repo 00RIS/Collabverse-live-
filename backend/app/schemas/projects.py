@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 from app.models.project import (
     ProjectApplicationStatus,
@@ -154,6 +155,28 @@ class ProjectResponse(BaseModel):
     model_config = ConfigDict(
         from_attributes=True
     )
+
+
+class ProjectResourceCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    resource_type: Literal["repository", "document", "media", "link"] = "link"
+    url: AnyHttpUrl
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectResourceResponse(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    added_by: uuid.UUID
+    title: str
+    resource_type: str
+    url: str
+    description: str | None
+    file_name: str | None
+    content_type: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # =========================================================

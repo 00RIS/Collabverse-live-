@@ -1,15 +1,26 @@
+import logging
 import uuid
+from pathlib import Path
+from tempfile import SpooledTemporaryFile
 
 from fastapi import (
     APIRouter,
     Depends,
+    File,
+    Form,
     Query,
+    Request,
     status,
+    UploadFile,
+    HTTPException,
 )
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.uploads import save_upload
 from app.db.session import get_db
+from app.models.project import Project, ProjectMember, ProjectResource
 from app.models.project import (
     ProjectDifficulty,
     ProjectStatus,
@@ -22,6 +33,8 @@ from app.schemas.projects import (
     ProjectCreate,
     ProjectMemberResponse,
     ProjectResponse,
+    ProjectResourceCreate,
+    ProjectResourceResponse,
     ProjectUpdate,
 )
 from app.services.projects import (
@@ -46,6 +59,33 @@ from app.services.projects import (
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+PROJECT_UPLOADS = {
+    ".jpg": ("image/jpeg", "media"),
+    ".jpeg": ("image/jpeg", "media"),
+    ".png": ("image/png", "media"),
+    ".webp": ("image/webp", "media"),
+    ".mp4": ("video/mp4", "media"),
+    ".webm": ("video/webm", "media"),
+    ".pdf": ("application/pdf", "document"),
+}
+
+
+def require_workspace_member(project: Project, user: User, db: Session) -> None:
+    if project.creator_id == user.id:
+        return
+    member_id = db.scalar(
+        select(ProjectMember.id).where(
+            ProjectMember.project_id == project.id,
+            ProjectMember.user_id == user.id,
+        )
+    )
+    if member_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Join this project to access its shared workspace.",
+        )
 
 
 # =========================================================
@@ -438,4 +478,169 @@ def leave_project_endpoint(
         user_id=current_user.id,
     )
 
+    return None
+
+
+@router.get(
+    "/{project_id}/resources",
+    response_model=list[ProjectResourceResponse],
+)
+def list_project_resources_endpoint(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+    return list(
+        db.scalars(
+            select(ProjectResource)
+            .where(ProjectResource.project_id == project.id)
+            .order_by(ProjectResource.created_at.desc())
+        )
+    )
+
+
+@router.post(
+    "/{project_id}/resources",
+    response_model=ProjectResourceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_project_resource_endpoint(
+    project_id: uuid.UUID,
+    data: ProjectResourceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+    resource = ProjectResource(
+        project_id=project.id,
+        added_by=current_user.id,
+        title=data.title.strip(),
+        resource_type=data.resource_type,
+        url=str(data.url),
+        description=data.description.strip() if data.description else None,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+    return resource
+
+
+@router.post(
+    "/{project_id}/resources/upload",
+    response_model=ProjectResourceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_project_resource_endpoint(
+    project_id: uuid.UUID,
+    request: Request,
+    file: UploadFile = File(...),
+    title: str = Form(default=""),
+    description: str = Form(default=""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+
+    suffix = Path(file.filename or "").suffix.lower()
+    upload_config = PROJECT_UPLOADS.get(suffix)
+    if upload_config is None or file.content_type != upload_config[0]:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Upload a JPG, PNG, WebP, MP4, WebM, or PDF file.",
+        )
+
+    max_bytes = 100 * 1024 * 1024 if suffix in {".mp4", ".webm"} else 20 * 1024 * 1024
+    stored_name = f"{current_user.id}-{uuid.uuid4().hex}{suffix}"
+    total = 0
+    first_chunk = True
+    try:
+        with SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as output:
+            while chunk := file.file.read(1024 * 1024):
+                if first_chunk:
+                    valid = (
+                        (suffix in {".jpg", ".jpeg"} and chunk.startswith(b"\xff\xd8\xff"))
+                        or (suffix == ".png" and chunk.startswith(b"\x89PNG\r\n\x1a\n"))
+                        or (suffix == ".webp" and chunk.startswith(b"RIFF") and chunk[8:12] == b"WEBP")
+                        or (suffix == ".mp4" and len(chunk) >= 12 and chunk[4:8] == b"ftyp")
+                        or (suffix == ".webm" and chunk.startswith(b"\x1a\x45\xdf\xa3"))
+                        or (suffix == ".pdf" and chunk.startswith(b"%PDF-"))
+                    )
+                    if not valid:
+                        raise HTTPException(
+                            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                            detail="The file contents do not match the selected file type.",
+                        )
+                    first_chunk = False
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Videos must be 100 MB or smaller; other files must be 20 MB or smaller.",
+                    )
+                output.write(chunk)
+            if total == 0:
+                raise HTTPException(status_code=400, detail="The selected file is empty.")
+            media_type = upload_config[0]
+            hosted_url = save_upload(
+                output,
+                f"projects/{project.id}/{stored_name}",
+                media_type,
+            )
+
+        resource = ProjectResource(
+            project_id=project.id,
+            added_by=current_user.id,
+            title=(title.strip()[:255] or Path(file.filename or "Shared file").name),
+            resource_type=upload_config[1],
+            url=hosted_url or f"{str(request.base_url).rstrip('/')}/uploads/projects/{project.id}/{stored_name}",
+            description=description.strip() or None,
+            file_name=Path(file.filename or stored_name).name[:255],
+            content_type=media_type,
+        )
+        db.add(resource)
+        db.commit()
+        db.refresh(resource)
+        return resource
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Project resource upload failed for project %s", project.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not store this project resource. Check the configured upload storage and try again.",
+        ) from exc
+    finally:
+        file.file.close()
+
+
+@router.delete(
+    "/{project_id}/resources/{resource_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_project_resource_endpoint(
+    project_id: uuid.UUID,
+    resource_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = require_project(db=db, project_id=project_id)
+    require_workspace_member(project, current_user, db)
+    resource = db.scalar(
+        select(ProjectResource).where(
+            ProjectResource.id == resource_id,
+            ProjectResource.project_id == project.id,
+        )
+    )
+    if resource is None:
+        raise HTTPException(status_code=404, detail="Project resource not found.")
+    if resource.added_by != current_user.id and project.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can remove only resources you added.")
+    db.delete(resource)
+    db.commit()
     return None

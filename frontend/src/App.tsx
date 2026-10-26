@@ -603,6 +603,7 @@ function PublicProfileScreen({ token, user, memberId, members, onBack, onMessage
 }
 
 type Project = { id: string; creator_id: string; title: string; description: string; domain?: string | null; project_type: string; difficulty: string; status: string; visibility: string; max_team_size?: number | null; is_accepting_members: boolean; start_date?: string | null; end_date?: string | null; created_at: string; skills?: { id: string; skill_id: string; required_level?: number | null }[] }
+type ProjectResource = { id: string; project_id: string; added_by: string; title: string; resource_type: 'repository' | 'document' | 'media' | 'link'; url: string; description?: string | null; file_name?: string | null; content_type?: string | null; created_at: string }
 
 function ProjectsScreen({ token, user, members, initialTab = 'discover' }: { token: string; user: User; members: PublicUser[]; initialTab?: 'discover' | 'created' | 'joined' }) {
   const [tab, setTab] = useState<'discover' | 'created' | 'joined'>(initialTab)
@@ -664,16 +665,21 @@ type Mentorship = { id: string; mentor_profile_id: string; mentee_user_id: strin
 function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }: { token: string; user: User; members: PublicUser[]; projectId: string; onBack: () => void; onChanged: () => void }) {
   const [project, setProject] = useState<Project | null>(null)
   const [team, setTeam] = useState<{ id: string; user_id: string; role: string; joined_at: string }[]>([])
+  const [resources, setResources] = useState<ProjectResource[]>([])
   const [applications, setApplications] = useState<{ id: string; user_id: string; message?: string | null; status: string; applied_at: string }[]>([])
   const [application, setApplication] = useState<{ id: string; status: string } | null>(null)
-  const [tab, setTab] = useState<'overview' | 'team' | 'applications'>('overview')
+  const [tab, setTab] = useState<'overview' | 'resources' | 'team' | 'applications'>('overview')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [applyOpen, setApplyOpen] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [resourceKind, setResourceKind] = useState<'repository' | 'document' | 'link'>('repository')
+  const [uploadingResources, setUploadingResources] = useState(false)
+  const resourceFileInput = useRef<HTMLInputElement>(null)
   const owner = project?.creator_id === user.id
   const joined = team.some((member) => member.user_id === user.id)
+  const canShareResources = Boolean(owner || joined)
 
   async function loadWorkspace() {
     setLoading(true); setError('')
@@ -683,6 +689,9 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
         request<{ id: string; user_id: string; role: string; joined_at: string }[]>(`/projects/${projectId}/members`, token),
       ])
       setProject(projectData); setTeam(teamData || [])
+      if (projectData.creator_id === user.id || teamData.some((member) => member.user_id === user.id)) {
+        setResources(await request<ProjectResource[]>(`/projects/${projectId}/resources`, token))
+      } else setResources([])
       if (projectData.creator_id === user.id) {
         const apps = await request<{ id: string; user_id: string; message?: string | null; status: string; applied_at: string }[]>(`/projects/${projectId}/applications`, token)
         setApplications(apps || [])
@@ -725,6 +734,43 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
     finally { setBusy('') }
   }
 
+  async function addWorkspaceLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = event.currentTarget
+    const data = new FormData(form)
+    setBusy('resource'); setError(''); setNotice('')
+    try {
+      const resource = await request<ProjectResource>(`/projects/${projectId}/resources`, token, { method: 'POST', body: JSON.stringify({ title: String(data.get('title') || '').trim(), url: String(data.get('url') || '').trim(), description: String(data.get('description') || '').trim() || null, resource_type: resourceKind }) })
+      setResources((items) => [resource, ...items]); form.reset(); setNotice('Shared with the project team.')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not share this link.') }
+    finally { setBusy('') }
+  }
+
+  async function uploadWorkspaceFiles(files: FileList | null) {
+    if (!files?.length) return
+    setUploadingResources(true); setError(''); setNotice('')
+    try {
+      const added: ProjectResource[] = []
+      for (const file of Array.from(files)) {
+        const body = new FormData(); body.append('file', file); body.append('title', file.name)
+        let response: Response
+        try { response = await fetch(`${API}/projects/${projectId}/resources/upload`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body }) }
+        catch { throw new Error('Could not reach the project upload service.') }
+        if (!response.ok) { const result = await response.json().catch(() => null); throw new Error(result?.detail || `Could not upload ${file.name}.`) }
+        added.push(await response.json())
+      }
+      setResources((items) => [...added.reverse(), ...items]); setNotice(`${added.length} ${added.length === 1 ? 'file' : 'files'} shared with the project team.`)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not upload these files.') }
+    finally { setUploadingResources(false); if (resourceFileInput.current) resourceFileInput.current.value = '' }
+  }
+
+  async function removeWorkspaceResource(resource: ProjectResource) {
+    setBusy(resource.id); setError('')
+    try { await request(`/projects/${projectId}/resources/${resource.id}`, token, { method: 'DELETE' }); setResources((items) => items.filter((item) => item.id !== resource.id)); setNotice('Shared resource removed.') }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not remove this resource.') }
+    finally { setBusy('') }
+  }
+
   async function removeMember(memberUserId: string) {
     if (!window.confirm(`Remove ${personName(memberUserId)} from this project?`)) return
     setBusy(memberUserId); setError(''); setNotice('')
@@ -754,10 +800,11 @@ function ProjectWorkspace({ token, user, members, projectId, onBack, onChanged }
   return <section className="project-workspace"><button className="project-back-link" onClick={onBack}><span>←</span> Back to projects</button>
     <header className="project-workspace-hero"><div className="project-workspace-icon"><Icon name="projects" size={23} /></div><div className="project-workspace-title"><div className="project-workspace-tags"><span>{format(project.project_type)}</span>{project.domain && <span>{project.domain}</span>}<span className={`project-status status-${project.status}`}>{format(project.status)}</span></div><h2>{project.title}</h2><p>Led by {personName(project.creator_id)} · Created {displayDate(project.created_at)}</p></div>{owner && <label className="workspace-status-field"><small>PROJECT STATUS</small><select value={project.status} disabled={busy === 'project'} onChange={(event) => void updateProject({ status: event.target.value }, 'Project status updated.')}><option value="draft">Draft</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label>}</header>
     {error && <div className="inline-error">{error}<button onClick={() => setError('')}>×</button></div>}{notice && <div className="project-notice">{notice}<button onClick={() => setNotice('')}>×</button></div>}
-    <div className="workspace-tabs"><button className={tab === 'overview' ? 'workspace-tab-active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'team' ? 'workspace-tab-active' : ''} onClick={() => setTab('team')}>Team <span>{team.length}</span></button>{owner && <button className={tab === 'applications' ? 'workspace-tab-active' : ''} onClick={() => setTab('applications')}>Applications <span>{pendingApplications.length || applications.length}</span></button>}</div>
+    <div className="workspace-tabs"><button className={tab === 'overview' ? 'workspace-tab-active' : ''} onClick={() => setTab('overview')}>Overview</button>{canShareResources && <button className={tab === 'resources' ? 'workspace-tab-active' : ''} onClick={() => setTab('resources')}>Workspace <span>{resources.length}</span></button>}<button className={tab === 'team' ? 'workspace-tab-active' : ''} onClick={() => setTab('team')}>Team <span>{team.length}</span></button>{owner && <button className={tab === 'applications' ? 'workspace-tab-active' : ''} onClick={() => setTab('applications')}>Applications <span>{pendingApplications.length || applications.length}</span></button>}</div>
     {tab === 'overview' && <div className="workspace-overview"><article className="workspace-main-card card"><div className="workspace-card-heading"><div><span className="eyebrow">PROJECT BRIEF</span><h3>About this project</h3></div><span className="workspace-difficulty">{format(project.difficulty)}</span></div><p className="workspace-description">{project.description}</p><div className="workspace-facts"><div><small>PROJECT TYPE</small><strong>{format(project.project_type)}</strong></div><div><small>DOMAIN</small><strong>{project.domain || 'Open domain'}</strong></div><div><small>TEAM SIZE</small><strong>{team.length}{project.max_team_size ? ` / ${project.max_team_size}` : ''} members</strong></div><div><small>START DATE</small><strong>{displayDate(project.start_date)}</strong></div><div><small>END DATE</small><strong>{displayDate(project.end_date)}</strong></div><div><small>VISIBILITY</small><strong>{format(project.visibility)}</strong></div></div></article><aside className="workspace-side-card card"><div className="workspace-card-heading"><div><span className="eyebrow">COLLABORATION</span><h3>Build the team</h3></div></div><div className="workspace-team-preview">{team.slice(0, 5).map((member) => <div key={member.id}><Avatar name={personName(member.user_id)} /><span><strong>{personName(member.user_id)}</strong><small>{format(member.role)}</small></span></div>)}</div><button className="workspace-text-link" onClick={() => setTab('team')}>View all {team.length} team members <span>→</span></button>{owner ? <div className="workspace-owner-controls"><label><input type="checkbox" checked={project.is_accepting_members} disabled={busy === 'project'} onChange={(event) => void updateProject({ is_accepting_members: event.target.checked }, event.target.checked ? 'This project is now accepting members.' : 'Applications are paused.')} /><span>Accepting applications</span></label><small>Turn this off to pause new applications.</small></div> : joined ? <button className="workspace-leave-button" disabled={busy === 'leave'} onClick={() => void leaveProject()}>{busy === 'leave' ? 'Leaving…' : 'Leave project'}</button> : <>{application ? <div className="workspace-application-state"><span>✓</span><div><strong>Application {format(application.status)}</strong><small>The project lead will be notified.</small></div></div> : project.is_accepting_members && project.status === 'open' ? <button className="primary-button workspace-apply-cta" onClick={() => setApplyOpen((value) => !value)}>{applyOpen ? 'Close application' : 'Apply to join'} <span>↗</span></button> : <div className="workspace-closed-note">This project is not accepting applications right now.</div>}</>}</aside>
       {applyOpen && <form className="workspace-application-form card" onSubmit={(event) => void submitApplication(event)}><div className="workspace-card-heading"><div><span className="eyebrow">YOUR APPLICATION</span><h3>Introduce yourself</h3></div></div><p>Tell the project lead what you’d like to contribute or learn.</p><textarea name="message" maxLength={2000} rows={4} placeholder="Share relevant experience, skills, and what interests you about this project." /><div className="project-form-footer"><span>Applications are private to the project team.</span><button className="primary-button" disabled={busy === 'apply'}>{busy === 'apply' ? 'Sending…' : 'Submit application'} <span>↗</span></button></div></form>}</div>}
     {tab === 'team' && <div className="workspace-team-section"><div className="workspace-section-heading"><div><h3>Project team</h3><p>People collaborating on this project.</p></div><span>{team.length} {team.length === 1 ? 'member' : 'members'}{project.max_team_size ? ` · ${project.max_team_size} max` : ''}</span></div><div className="workspace-member-list">{team.map((member) => <article className="workspace-member card" key={member.id}><Avatar name={personName(member.user_id)} /><span><strong>{personName(member.user_id)}</strong><small>{member.user_id === user.id ? 'You · ' : ''}{format(member.role)} · Joined {new Date(member.joined_at).toLocaleDateString([], { month: 'short', year: 'numeric' })}</small></span>{member.role === 'owner' && <span className="workspace-owner-badge">Project lead</span>}{owner && member.user_id !== user.id && <button className="workspace-remove-member" disabled={busy === member.user_id} onClick={() => void removeMember(member.user_id)}>Remove</button>}</article>)}</div>{!team.length && <div className="projects-empty card"><h3>Your team is taking shape</h3><p>Accepted applicants will appear here.</p></div>}</div>}
+    {tab === 'resources' && canShareResources && <div className="project-shared-workspace"><div className="workspace-section-heading"><div><h3>Shared workspace</h3><p>Keep repositories, useful links, documents, and project media together for your team.</p></div><span>{resources.length} shared</span></div><div className="workspace-share-grid"><form className="workspace-share-link card" onSubmit={(event) => void addWorkspaceLink(event)}><span className="eyebrow">ADD A SHARED LINK</span><label className="project-field">What are you sharing?<select value={resourceKind} onChange={(event) => setResourceKind(event.target.value as typeof resourceKind)}><option value="repository">Code repository</option><option value="document">Document or design</option><option value="link">Reference link</option></select></label><label className="project-field">Title<input name="title" required maxLength={255} placeholder="e.g. GitHub repository" /></label><label className="project-field">URL<input name="url" type="url" required placeholder="https://github.com/your-team/project" /></label><label className="project-field">Notes<textarea name="description" rows={2} maxLength={2000} placeholder="What should teammates know about this link?" /></label><button className="primary-button" disabled={busy === 'resource'}>{busy === 'resource' ? 'Sharing…' : 'Share link'} <span>↗</span></button></form><article className="workspace-share-upload card"><span className="eyebrow">UPLOAD TEAM FILES</span><h3>Share media and documents</h3><p>Upload images, videos, or PDFs for project members. Files are stored with your configured upload provider.</p><input ref={resourceFileInput} type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,application/pdf" multiple hidden onChange={(event) => void uploadWorkspaceFiles(event.currentTarget.files)} /><button className="secondary-button" onClick={() => resourceFileInput.current?.click()} disabled={uploadingResources}>{uploadingResources ? 'Uploading…' : 'Choose files'} <span>＋</span></button><small>JPG, PNG, WebP, MP4, WebM, or PDF. Up to 20 MB per file; videos up to 100 MB.</small></article></div><div className="workspace-resource-list">{resources.map((resource) => <article className="workspace-resource card" key={resource.id}>{resource.content_type?.startsWith('image/') && <a href={resource.url} target="_blank" rel="noreferrer" className="workspace-resource-preview"><img src={resource.url} alt={resource.title} loading="lazy" /></a>}{resource.content_type?.startsWith('video/') && <video className="workspace-resource-preview" src={resource.url} controls preload="metadata" />}{resource.content_type === 'application/pdf' && <span className="workspace-resource-file-mark">PDF</span>}<div className="workspace-resource-copy"><span className="workspace-resource-type">{resource.resource_type === 'repository' ? '⌘ REPOSITORY' : resource.resource_type.toUpperCase()}</span><a href={resource.url} target="_blank" rel="noreferrer"><strong>{resource.title}</strong><span>↗</span></a>{resource.description && <p>{resource.description}</p>}<small>Shared by {personName(resource.added_by)} · {timeAgo(resource.created_at)}{resource.file_name ? ` · ${resource.file_name}` : ''}</small></div>{(owner || resource.added_by === user.id) && <button className="remove-item workspace-resource-remove" aria-label={`Remove ${resource.title}`} disabled={busy === resource.id} onClick={() => void removeWorkspaceResource(resource)}>×</button>}</article>)}{resources.length === 0 && <div className="projects-empty card"><span className="message-empty-icon"><Icon name="projects" size={21} /></span><h3>Your project resources will live here</h3><p>Share the repository, reference material, and files your team needs to work together.</p></div>}</div></div>}
     {tab === 'applications' && owner && <div className="workspace-applications"><div className="workspace-section-heading"><div><h3>Applications</h3><p>Review people who want to contribute to your project.</p></div><span>{pendingApplications.length} pending · {applications.length} total</span></div>{applications.length ? <div className="workspace-application-list">{applications.map((item) => <article className="workspace-applicant card" key={item.id}><Avatar name={personName(item.user_id)} /><div><strong>{personName(item.user_id)}</strong><small>Applied {new Date(item.applied_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</small><p>{item.message || 'No introduction provided.'}</p></div><span className={`mentorship-status mentorship-${item.status}`}>{format(item.status)}</span>{item.status === 'pending' && <div className="workspace-applicant-actions"><button className="primary-button" disabled={busy === item.id} onClick={() => void applicationDecision(item.id, 'accept')}>Accept</button><button className="decline-request" disabled={busy === item.id} onClick={() => void applicationDecision(item.id, 'reject')}>Decline</button></div>}</article>)}</div> : <div className="projects-empty card"><span className="message-empty-icon"><Icon name="network" size={21} /></span><h3>No applications yet</h3><p>When people apply, you’ll be able to review their introductions and invite them to the team here.</p></div>}</div>}
   </section>
 }

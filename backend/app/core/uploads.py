@@ -88,7 +88,13 @@ def save_upload(file_obj: BinaryIO, object_name: str, content_type: str) -> str 
     if cloudinary_storage_enabled():
         cloudinary = _configure_cloudinary()
         extensionless_name = str(Path(object_name).with_suffix(""))
-        resource_type = "video" if content_type.startswith("video/") else "image"
+        resource_type = (
+            "video"
+            if content_type.startswith("video/")
+            else "raw"
+            if content_type == "application/pdf"
+            else "image"
+        )
         result = cloudinary.uploader.upload(
             file_obj,
             public_id=f"collabverse/{extensionless_name}",
